@@ -1,0 +1,11 @@
+{
+  "1234567890123456789": {
+    "label": "my-api",
+    "cwd": "~/code/my-api",
+    "kind": "claude"
+  },
+  "9876543210987654321": {
+    "cwd": "/srv/infra",
+    "kind": "codex"
+  }
+}

@@ -1,0 +1,29 @@
+id = "herdr.discord"
+name = "Discord"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Use Discord as a UI layer for Herdr: channels map to workspaces, threads spawn agents in tabs."
+platforms = ["linux", "macos", "windows"]
+
+[[build]]
+command = ["npm", "ci"]
+
+[[startup]]
+command = ["node", "src/startup.js"]
+
+[[panes]]
+id = "bot"
+title = "Discord bot"
+placement = "tab"
+command = ["node", "src/bot.js"]
+
+[[actions]]
+id = "open-bot"
+title = "Open Discord bot"
+contexts = ["workspace"]
+command = ["node", "src/actions/open-bot.js"]
+
+[[actions]]
+id = "status"
+title = "Discord bridge status"
+command = ["node", "src/actions/status.js"]
