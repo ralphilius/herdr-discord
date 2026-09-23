@@ -30,7 +30,7 @@ logs are visible in Herdr and its lifetime is managed by the Herdr server.
 From GitHub (once pushed):
 
 ```sh
-herdr plugin install <owner>/herdr-discord
+herdr plugin install ralphilius/herdr-discord
 ```
 
 Or link a local checkout while developing:
@@ -125,7 +125,7 @@ Three pieces keep the bridge alive on a headless box:
 On the server, install the plugin and configure it as usual:
 
 ```sh
-herdr plugin install <owner>/herdr-discord    # or: git clone … && herdr plugin link .
+herdr plugin install ralphilius/herdr-discord    # or: git clone … && herdr plugin link .
 CONFIG_DIR="$(herdr plugin config-dir herdr.discord)"
 cp .env.example "$CONFIG_DIR/.env"            # set DISCORD_BOT_TOKEN, DISCORD_AUTOSTART=1
 ```
