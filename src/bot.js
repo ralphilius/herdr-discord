@@ -1,6 +1,16 @@
-import { Client, GatewayIntentBits } from "discord.js";
+import {
+  Client,
+  GatewayIntentBits,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+} from "discord.js";
 import { config, requireToken } from "./config.js";
 import * as herdr from "./herdr.js";
+import { parsePrompt, keysForOption } from "./prompts.js";
 import { loadState, saveState } from "./state.js";
 
 const token = requireToken();
@@ -204,6 +214,124 @@ async function onCommand(msg, mapping, text) {
   }
 }
 
+// Button rows for a blocked agent. custom_id format: "hd:keys:<agent>:<k1,k2>"
+// sends those keys; "hd:modal:<agent>" opens a free-text answer modal;
+// "hd:text:<agent>" is the modal submit.
+function promptComponents(agentName, parsed) {
+  const keyButton = (keys, label, style) =>
+    new ButtonBuilder()
+      .setCustomId(`hd:keys:${agentName}:${keys.join(",")}`)
+      .setLabel(label.slice(0, 80))
+      .setStyle(style);
+
+  const rows = [];
+  if (parsed.type === "options") {
+    for (let r = 0; r * 5 < parsed.options.length && rows.length < 4; r++) {
+      const row = new ActionRowBuilder();
+      for (const opt of parsed.options.slice(r * 5, r * 5 + 5)) {
+        row.addComponents(
+          keyButton(keysForOption(parsed, opt.index), `${opt.num}. ${opt.label}`, ButtonStyle.Primary),
+        );
+      }
+      rows.push(row);
+    }
+  } else if (parsed.type === "yesno") {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        keyButton(["y"], "Yes", ButtonStyle.Success),
+        keyButton(["n"], "No", ButtonStyle.Danger),
+      ),
+    );
+  } else {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        keyButton(["enter"], "Approve (Enter)", ButtonStyle.Success),
+        keyButton(["esc"], "Cancel (Esc)", ButtonStyle.Danger),
+      ),
+    );
+  }
+  if (rows.length < 5) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`hd:modal:${agentName}`)
+          .setLabel("Type answer…")
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    );
+  }
+  return rows;
+}
+
+function mappingForAgent(name) {
+  return Object.values(state.threads).find((t) => t.agent_name === name);
+}
+
+async function markAnswered(ix, note) {
+  const content = ix.message?.content ?? "";
+  await ix.editReply({
+    content: `${content}\n— ${note} by ${ix.user.username}`.slice(0, 2000),
+    components: [],
+  });
+}
+
+async function onInteraction(ix) {
+  try {
+    if (!ix.isButton() && !ix.isModalSubmit()) return;
+    const [ns, kind, agentName, payload] = ix.customId.split(":");
+    if (ns !== "hd" || !kind || !agentName) return;
+    if (!authorized(ix.user.id)) {
+      return ix.reply({ content: "You are not on the allowed-users list for this bridge.", ephemeral: true });
+    }
+    const mapping = mappingForAgent(agentName);
+    if (!mapping) {
+      return ix.reply({ content: `No agent named \`${agentName}\` is mapped anymore.`, ephemeral: true });
+    }
+
+    if (ix.isButton() && kind === "modal") {
+      const modal = new ModalBuilder()
+        .setCustomId(`hd:text:${agentName}`)
+        .setTitle(`Answer ${agentName}`.slice(0, 45));
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId("answer")
+            .setLabel("Response sent to the agent")
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true),
+        ),
+      );
+      return ix.showModal(modal);
+    }
+
+    if (ix.isButton() && kind === "keys") {
+      const agent = await herdr.getAgent(agentName).catch(() => null);
+      const status = agent?.status ?? agent?.agent_status;
+      if (status && status !== "blocked") {
+        return ix.update({
+          content: `${ix.message.content}\n— already answered (agent is ${status})`,
+          components: [],
+        });
+      }
+      await ix.deferUpdate();
+      await herdr.sendKeys(agentName, payload.split(","));
+      return markAnswered(ix, `chose \`${payload}\``);
+    }
+
+    if (ix.isModalSubmit() && kind === "text") {
+      const answer = ix.fields.getTextInputValue("answer");
+      await ix.deferUpdate();
+      await herdr.sendText(mapping.pane_id, answer);
+      await herdr.sendKeys(agentName, ["enter"]);
+      return markAnswered(ix, "sent a reply");
+    }
+  } catch (err) {
+    console.error("interaction failed:", err);
+    const reply = { content: `Error: ${err.message}`, ephemeral: true };
+    await (ix.deferred || ix.replied ? ix.followUp(reply) : ix.reply(reply)).catch(() => {});
+  }
+}
+
 async function pollAgents() {
   const agents = await herdr.listAgents().catch(() => null);
   if (agents === null) return;
@@ -238,10 +366,15 @@ async function pollAgents() {
 
     if (status === "blocked") {
       const snapshot = await herdr
-        .readAgent(mapping.agent_name, { source: "detection", lines: 15 })
+        .readAgent(mapping.agent_name, { source: "detection", lines: 25 })
         .catch(() => "");
-      await thread.send(`🛑 \`${mapping.agent_name}\` needs input.`).catch(() => {});
       if (snapshot.trim()) await postOutput(thread, snapshot).catch(() => {});
+      await thread
+        .send({
+          content: `🛑 \`${mapping.agent_name}\` needs input — pick an option or reply here:`,
+          components: promptComponents(mapping.agent_name, parsePrompt(snapshot)),
+        })
+        .catch(() => {});
     } else if (status === "done") {
       const output = await herdr
         .readAgent(mapping.agent_name, { lines: config.outputLines })
@@ -255,6 +388,7 @@ async function pollAgents() {
 
 client.on("threadCreate", onThreadCreate);
 client.on("messageCreate", onMessage);
+client.on("interactionCreate", onInteraction);
 client.once("clientReady", (c) => {
   console.log(`herdr-discord: logged in as ${c.user.tag}`);
   setInterval(() => pollAgents().catch((e) => console.error("poll failed:", e)), config.pollMs);

@@ -105,13 +105,30 @@ description = "open Discord bot"
 3. When the agent blocks on a question or finishes a turn, the bot posts the
    status plus the relevant terminal output.
 
+### Answering blocked agents
+
+When an agent goes `blocked` (permission prompt, numbered menu, y/n question),
+the bot posts the terminal snapshot followed by a message with buttons:
+
+- **Numbered menus** — the bot parses `❯ 1. Yes / 2. No`-style options from the
+  snapshot and renders a button per option. Clicking sends arrow keys + Enter
+  (or the number key when no cursor row is visible).
+- **y/n prompts** — Yes / No buttons send the `y`/`n` keys.
+- **Anything else** — Approve (Enter) and Cancel (Esc) fallback buttons.
+- **Type answer…** — opens a modal; the text is typed into the agent's pane
+  and submitted with Enter.
+
+After an answer the buttons are replaced by a note of who answered. If the
+agent was already unblocked in Herdr, clicking shows that instead of sending
+keys. Buttons honor `DISCORD_ALLOWED_USERS`.
+
 ### Thread commands
 
 | Command      | Effect                                        |
 | ------------ | --------------------------------------------- |
 | `!status`    | Agent status + workspace/tab/pane ids         |
 | `!read [n]`  | Post the last n lines of agent output         |
-| `!approve`   | Send Enter to an agent blocked on a prompt    |
+| `!approve`   | Send Enter to a blocked agent (buttons usually cover this) |
 | `!close`     | Close the agent's Herdr tab and unmap thread  |
 | `!help`      | Show commands                                 |
 
@@ -119,7 +136,10 @@ description = "open Discord bot"
 
 - `src/bot.js` — discord.js gateway client; maps `threadCreate` →
   `workspace create` + `tab create` + `agent start`, `messageCreate` →
-  `agent prompt`, and polls `agent list` to relay status back.
+  `agent prompt`, polls `agent list` to relay status back, and answers
+  blocked agents via button/modal interactions.
+- `src/prompts.js` — parses detection snapshots into clickable options
+  (numbered menus, y/n prompts) and maps them to Herdr keys.
 - `src/herdr.js` — thin async wrapper over `HERDR_BIN_PATH` (the Herdr CLI is
   the plugin API; JSON in, JSON out).
 - `src/state.js` — thread/channel → agent/workspace mapping, persisted under

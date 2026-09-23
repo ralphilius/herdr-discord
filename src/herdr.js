@@ -132,6 +132,12 @@ export async function sendKeys(target, keys) {
   return herdr(["agent", "send-keys", target, ...keys]);
 }
 
+// Literal text into the pane's PTY (no Enter). Used for free-text answers
+// to blocked agents, where send-keys would need one event per character.
+export async function sendText(paneId, text) {
+  return herdr(["pane", "send-text", paneId, text]);
+}
+
 export async function closeTab(tabId) {
   return herdr(["tab", "close", tabId]);
 }
