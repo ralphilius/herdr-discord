@@ -72,8 +72,10 @@ A channel is watched when **either**:
   work too — their guidelines field is the topic.
 
 - or it is **bound with `!setup`** — post `!setup` in the channel and pick a
-  workspace from the dropdown. The binding is stored in plugin state and also
-  watches the channel; no topic or file needed.
+  workspace from the dropdown. On forum channels (which have no message box),
+  make `!setup` the post's first message **or its title** — the command binds
+  the parent forum and never spawns an agent. The binding is stored in plugin
+  state and also watches the channel; no topic or file needed.
 
 - or it has an entry in **`channels.json`** in the plugin config dir (overrides
   the topic):
@@ -92,7 +94,8 @@ labeled after the channel on the first thread.
 
 ### Channel commands
 
-Posted in the channel itself (not a thread):
+Posted in the channel itself — or, on forum channels, as a post's first
+message or title (the command binds the forum, not that one post):
 
 | Command           | Effect                                                  |
 | ----------------- | ------------------------------------------------------- |

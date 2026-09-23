@@ -8,6 +8,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
   StringSelectMenuBuilder,
+  ChannelType,
 } from "discord.js";
 import { config, requireToken } from "./config.js";
 import * as herdr from "./herdr.js";
@@ -87,23 +88,31 @@ async function onThreadCreate(thread) {
     const starter = await thread.fetchStarterMessage().catch(() => null);
     if (starter && !authorized(starter.author.id)) return;
 
+    // A `!` command as the post body or forum post title is aimed at the
+    // bridge, not an agent — run it as a channel command bound to the parent.
+    // This is the only setup path on forum channels, which have no message box.
+    const cmdText = [starter?.content?.trim(), thread.name.trim()]
+      .filter(Boolean)
+      .find((t) => t.startsWith("!"));
+    if (cmdText) {
+      await thread.join().catch(() => {});
+      await onChannelCommand(
+        {
+          authorId: starter?.author?.id ?? thread.ownerId,
+          channelId: thread.parentId,
+          topic: thread.parent?.topic,
+          send: (c) => thread.send(c),
+        },
+        cmdText,
+      );
+      return;
+    }
+
     const channelState = state.channels[thread.parentId];
     const channelCfg =
       config.channelConfig(thread.parentId, thread.parent?.topic) ??
       (channelState?.bound ? {} : null);
-    if (channelCfg === null) {
-      // Silent for ordinary threads in unwatched channels — but a `!` command
-      // was aimed at the bot, so say why nothing happened.
-      if (starter?.content?.trim().startsWith("!")) {
-        await thread
-          .send(
-            "This channel isn't watched yet. Post `!setup` in the channel itself " +
-              "(not in a thread) to bind a workspace, or add `herdr:` to the channel topic.",
-          )
-          .catch(() => {});
-      }
-      return;
-    }
+    if (channelCfg === null) return;
 
     await thread.join().catch(() => {});
 
@@ -195,12 +204,41 @@ async function onMessage(msg) {
     if (!msg.channel.isThread()) {
       if (msg.hasThread) return; // thread starter echo in the parent channel
       const text = msg.content.trim();
-      if (text.startsWith("!")) await onChannelCommand(msg, text);
+      if (text.startsWith("!")) {
+        await onChannelCommand(
+          {
+            authorId: msg.author.id,
+            channelId: msg.channelId,
+            topic: msg.channel.topic,
+            send: (c) => msg.reply(c),
+          },
+          text,
+        );
+      }
       return;
     }
 
     const mapping = state.threads[msg.channel.id];
-    if (!mapping) return;
+    if (!mapping) {
+      // Forum channels have no message box — `!` commands in an unmapped post
+      // are channel commands aimed at the parent forum.
+      const parent = msg.channel.parent;
+      const isForumPost =
+        parent && (parent.type === ChannelType.GuildForum || parent.type === ChannelType.GuildMedia);
+      const text = msg.content.trim();
+      if (isForumPost && text.startsWith("!")) {
+        await onChannelCommand(
+          {
+            authorId: msg.author.id,
+            channelId: parent.id,
+            topic: parent.topic,
+            send: (c) => msg.channel.send(c),
+          },
+          text,
+        );
+      }
+      return;
+    }
     if (!authorized(msg.author.id)) {
       await msg.reply("You are not on the allowed-users list for this bridge.");
       return;
@@ -231,26 +269,27 @@ async function onMessage(msg) {
   }
 }
 
-// Commands posted in the channel itself (not a thread). `!setup` binds the
-// channel to an existing workspace; binding also watches the channel.
-async function onChannelCommand(msg, text) {
+// Commands scoped to a channel: posted in the channel itself on text
+// channels, or as a post's first message/title on forum channels. `!setup`
+// binds the channel to an existing workspace; binding also watches it.
+async function onChannelCommand({ authorId, channelId, topic, send }, text) {
   const [cmd, arg] = text.slice(1).split(/\s+/, 2);
-  const chState = state.channels[msg.channelId];
+  const chState = state.channels[channelId];
 
   switch (cmd.toLowerCase()) {
     case "setup": {
-      if (!authorized(msg.author.id)) {
-        await msg.reply("You are not on the allowed-users list for this bridge.");
+      if (!authorized(authorId)) {
+        await send("You are not on the allowed-users list for this bridge.");
         return;
       }
       const machine =
         arg ||
-        config.channelConfig(msg.channelId, msg.channel.topic)?.machine ||
+        config.channelConfig(channelId, topic)?.machine ||
         chState?.machine ||
         null;
       const workspaces = await herdr.listWorkspaces(machine).catch(() => []);
       const select = new StringSelectMenuBuilder()
-        .setCustomId(`hd:setup:${msg.channelId}`)
+        .setCustomId(`hd:setup:${channelId}`)
         .setPlaceholder("Pick a Herdr workspace for this channel");
       for (const w of workspaces.slice(0, 24)) {
         select.addOptions({
@@ -264,18 +303,18 @@ async function onChannelCommand(msg, text) {
         value: JSON.stringify({ m: machine, new: true }),
         description: "create one from this channel on the first thread",
       });
-      await msg.reply({
+      await send({
         content: `Bind this channel to a Herdr workspace${machine ? ` on \`${machine}\`` : ""}:`,
         components: [new ActionRowBuilder().addComponents(select)],
       });
       break;
     }
     case "unbind": {
-      if (!authorized(msg.author.id)) return;
-      delete state.channels[msg.channelId];
+      if (!authorized(authorId)) return;
+      delete state.channels[channelId];
       saveState(state);
-      const stillWatched = config.channelConfig(msg.channelId, msg.channel.topic) !== null;
-      await msg.reply(
+      const stillWatched = config.channelConfig(channelId, topic) !== null;
+      await send(
         stillWatched
           ? "Workspace binding cleared — the topic/channels.json still watch this channel, so new threads auto-create a workspace."
           : "Channel unbound — new threads will no longer spawn agents.",
@@ -283,8 +322,7 @@ async function onChannelCommand(msg, text) {
       break;
     }
     case "status": {
-      const watched =
-        config.channelConfig(msg.channelId, msg.channel.topic) !== null || chState?.bound;
+      const watched = config.channelConfig(channelId, topic) !== null || chState?.bound;
       const lines = [`Channel watched: **${watched ? "yes" : "no"}**`];
       if (chState?.workspace_id)
         lines.push(
@@ -292,20 +330,23 @@ async function onChannelCommand(msg, text) {
         );
       if (chState?.machine) lines.push(`Machine: \`${chState.machine}\``);
       const threads = Object.values(state.threads).filter(
-        (t) => t.channel_id === msg.channelId,
+        (t) => t.channel_id === channelId,
       ).length;
       lines.push(`Mapped threads: ${threads}`);
-      await msg.reply(lines.join("\n"));
+      await send(lines.join("\n"));
       break;
     }
     case "help": {
-      await msg.reply(
+      await send(
         "`!setup [machine]` bind this channel to a Herdr workspace · `!unbind` clear the binding · `!status` channel state\n" +
           "Or put `herdr:` in the channel topic, e.g. `herdr: workspace=my-api kind=claude`.",
       );
       break;
     }
     default:
+      await send(
+        "Unknown command. `!setup [machine]` `!unbind` `!status` `!help`",
+      ).catch(() => {});
       break;
   }
 }
@@ -345,8 +386,8 @@ async function onCommand(msg, mapping, text) {
     }
     case "setup": {
       await msg.reply(
-        "`!setup` is a channel command — post it in the channel itself, not in a thread. " +
-          "This thread already has an agent (`!status` to check it).",
+        "`!setup` is a channel command — post it in the channel itself, or as a " +
+          "forum post's first message/title. This thread already has an agent (`!status` to check it).",
       );
       break;
     }
