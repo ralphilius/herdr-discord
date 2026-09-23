@@ -52,18 +52,18 @@ function slugify(name, taken) {
   return candidate;
 }
 
-// Directive lines in a thread's starter message: `kind:codex`, `cwd:/path`.
-// Returns { kind, cwd, prompt } — the prompt is the remaining text.
+// Directive lines in a thread's starter message: `kind:codex`, `cwd:/path`,
+// `machine:gpu-box`. Returns the directives plus the remaining prompt text.
 function parseStarter(content) {
   const lines = (content ?? "").split("\n");
   const directives = {};
   const rest = [];
   for (const line of lines) {
-    const m = line.trim().match(/^(kind|cwd)\s*:\s*(\S+)\s*$/i);
+    const m = line.trim().match(/^(kind|cwd|machine)\s*:\s*(\S+)\s*$/i);
     if (m) directives[m[1].toLowerCase()] = m[2];
     else rest.push(line);
   }
-  return { kind: directives.kind, cwd: directives.cwd, prompt: rest.join("\n").trim() };
+  return { ...directives, prompt: rest.join("\n").trim() };
 }
 
 function authorized(userId) {
@@ -75,7 +75,7 @@ async function onThreadCreate(thread) {
     if (config.guildId && thread.guildId !== config.guildId) return;
     if (state.threads[thread.id]) return;
 
-    const channelCfg = config.channelConfig(thread.parentId);
+    const channelCfg = config.channelConfig(thread.parentId, thread.parent?.topic);
     if (channelCfg === null) return;
 
     const starter = await thread.fetchStarterMessage().catch(() => null);
@@ -83,17 +83,22 @@ async function onThreadCreate(thread) {
 
     await thread.join().catch(() => {});
 
-    const { kind: kindDirective, cwd: cwdDirective, prompt } = parseStarter(starter?.content);
-    const kind = kindDirective ?? channelCfg.kind ?? config.agentKind;
-    const cwd = cwdDirective ?? channelCfg.cwd ?? config.cwd;
+    const starter_directives = parseStarter(starter?.content);
+    const { prompt } = starter_directives;
+    const kind = starter_directives.kind ?? channelCfg.kind ?? config.agentKind;
+    const cwd = starter_directives.cwd ?? channelCfg.cwd ?? config.cwd;
+    const machine = starter_directives.machine ?? channelCfg.machine ?? null;
 
     await thread.send(`Starting a **${kind}** agent for this thread…`);
 
     const channelState = (state.channels[thread.parentId] ??= {});
+    if (channelState.machine !== machine) channelState.workspace_id = null;
+    channelState.machine = machine;
     const workspace = await herdr.ensureWorkspace({
       workspaceId: channelState.workspace_id,
       cwd: channelCfg.cwd ?? config.cwd,
       label: channelCfg.label ?? thread.parent?.name ?? `discord-${thread.parentId}`,
+      machine,
     });
     channelState.workspace_id = workspace.workspace_id;
 
@@ -101,17 +106,20 @@ async function onThreadCreate(thread) {
       workspaceId: workspace.workspace_id,
       cwd,
       label: thread.name.slice(0, 60),
+      machine,
     });
     const paneId = tab.root_pane?.pane_id ?? tab.pane?.pane_id;
     if (!paneId) throw new Error("tab created but no root pane id in response");
 
     const existing = new Set(
-      (await herdr.listAgents().catch(() => [])).map((a) => a.name ?? a.agent),
+      (await herdr.listAgents(machine).catch(() => [])).map((a) => a.name ?? a.agent),
     );
-    for (const t of Object.values(state.threads)) existing.add(t.agent_name);
+    for (const t of Object.values(state.threads)) {
+      if ((t.machine ?? null) === machine) existing.add(t.agent_name);
+    }
     const name = slugify(thread.name, existing);
 
-    await herdr.startAgent({ name, kind, paneId });
+    await herdr.startAgent({ name, kind, paneId, machine });
 
     state.threads[thread.id] = {
       workspace_id: workspace.workspace_id,
@@ -119,6 +127,7 @@ async function onThreadCreate(thread) {
       pane_id: paneId,
       agent_name: name,
       kind,
+      machine,
       channel_id: thread.parentId,
       last_status: "starting",
     };
@@ -126,11 +135,12 @@ async function onThreadCreate(thread) {
 
     await post(
       thread,
-      `Agent \`${name}\` (${kind}) is up — tab \`${tab.tab?.tab_id}\` in workspace \`${workspace.workspace_id}\`.\n` +
+      `Agent \`${name}\` (${kind}) is up — tab \`${tab.tab?.tab_id}\` in workspace \`${workspace.workspace_id}\`` +
+        `${machine ? ` on \`${machine}\`` : ""}.\n` +
         "Reply here to prompt it. Commands: `!status` `!read [n]` `!approve` `!close` `!help`",
     );
 
-    if (prompt) await herdr.promptAgent(name, prompt);
+    if (prompt) await herdr.promptAgent(name, prompt, machine);
   } catch (err) {
     console.error("threadCreate failed:", err);
     await thread.send(`Failed to start agent: ${err.message}`).catch(() => {});
@@ -155,7 +165,7 @@ async function onMessage(msg) {
       `${msg.member?.displayName ?? msg.author.username}: ${text}` +
       (attachments.length ? `\n${attachments.join("\n")}` : "");
     try {
-      await herdr.promptAgent(mapping.agent_name, prompt);
+      await herdr.promptAgent(mapping.agent_name, prompt, mapping.machine);
       await msg.react("✅").catch(() => {});
     } catch (err) {
       if (err.code === "agent_blocked") {
@@ -176,27 +186,31 @@ async function onCommand(msg, mapping, text) {
   const [cmd, arg] = text.slice(1).split(/\s+/, 2);
   switch (cmd.toLowerCase()) {
     case "status": {
-      const agent = await herdr.getAgent(mapping.agent_name);
+      const agent = await herdr.getAgent(mapping.agent_name, mapping.machine);
       const status = agent.status ?? agent.agent_status ?? "unknown";
       await msg.reply(
         `\`${mapping.agent_name}\` (${mapping.kind}) — **${status}**\n` +
-          `workspace \`${mapping.workspace_id}\` tab \`${mapping.tab_id}\` pane \`${mapping.pane_id}\``,
+          `workspace \`${mapping.workspace_id}\` tab \`${mapping.tab_id}\` pane \`${mapping.pane_id}\`` +
+          (mapping.machine ? ` machine \`${mapping.machine}\`` : ""),
       );
       break;
     }
     case "read": {
       const n = Math.min(Math.max(parseInt(arg, 10) || config.outputLines, 1), 80);
-      await postOutput(msg.channel, await herdr.readAgent(mapping.agent_name, { lines: n }));
+      await postOutput(
+        msg.channel,
+        await herdr.readAgent(mapping.agent_name, { lines: n, machine: mapping.machine }),
+      );
       break;
     }
     case "approve": {
-      await herdr.sendKeys(mapping.agent_name, ["enter"]);
+      await herdr.sendKeys(mapping.agent_name, ["enter"], mapping.machine);
       await msg.react("👍").catch(() => {});
       break;
     }
     case "close": {
       await msg.reply("Closing the agent tab…");
-      if (mapping.tab_id) await herdr.closeTab(mapping.tab_id).catch(() => {});
+      if (mapping.tab_id) await herdr.closeTab(mapping.tab_id, mapping.machine).catch(() => {});
       delete state.threads[msg.channel.id];
       saveState(state);
       break;
@@ -205,7 +219,8 @@ async function onCommand(msg, mapping, text) {
       await msg.reply(
         "`!status` agent status · `!read [n]` last n output lines · " +
           "`!approve` send Enter to a blocked agent · `!close` close the agent tab\n" +
-          "Starter message directives: `kind:<agent>` and `cwd:<path>` on their own lines.",
+          "Starter directives (own lines): `kind:<agent>` `cwd:<path>` `machine:<label>`. " +
+          "Channel config goes in the channel topic: `herdr: kind=codex cwd=~/code/x`.",
       );
       break;
     }
@@ -305,7 +320,7 @@ async function onInteraction(ix) {
     }
 
     if (ix.isButton() && kind === "keys") {
-      const agent = await herdr.getAgent(agentName).catch(() => null);
+      const agent = await herdr.getAgent(agentName, mapping.machine).catch(() => null);
       const status = agent?.status ?? agent?.agent_status;
       if (status && status !== "blocked") {
         return ix.update({
@@ -314,15 +329,15 @@ async function onInteraction(ix) {
         });
       }
       await ix.deferUpdate();
-      await herdr.sendKeys(agentName, payload.split(","));
+      await herdr.sendKeys(agentName, payload.split(","), mapping.machine);
       return markAnswered(ix, `chose \`${payload}\``);
     }
 
     if (ix.isModalSubmit() && kind === "text") {
       const answer = ix.fields.getTextInputValue("answer");
       await ix.deferUpdate();
-      await herdr.sendText(mapping.pane_id, answer);
-      await herdr.sendKeys(agentName, ["enter"]);
+      await herdr.sendText(mapping.pane_id, answer, mapping.machine);
+      await herdr.sendKeys(agentName, ["enter"], mapping.machine);
       return markAnswered(ix, "sent a reply");
     }
   } catch (err) {
@@ -332,58 +347,71 @@ async function onInteraction(ix) {
   }
 }
 
+// Group thread mappings by machine: each Herdr server owns its own agents,
+// so remote mappings are polled through `herdr --machine <label>`.
 async function pollAgents() {
-  const agents = await herdr.listAgents().catch(() => null);
-  if (agents === null) return;
-  const byName = new Map();
-  for (const a of agents) {
-    const name = a.name ?? a.agent;
-    if (name) byName.set(name, a.status ?? a.agent_status ?? "unknown");
+  const byMachine = new Map();
+  for (const [threadId, mapping] of Object.entries(state.threads)) {
+    const machine = mapping.machine ?? null;
+    if (!byMachine.has(machine)) byMachine.set(machine, []);
+    byMachine.get(machine).push([threadId, mapping]);
   }
 
   let dirty = false;
-  for (const [threadId, mapping] of Object.entries(state.threads)) {
-    const status = byName.get(mapping.agent_name);
-    const prev = mapping.last_status;
-
-    if (status === undefined) {
-      if (prev !== "gone") {
-        mapping.last_status = "gone";
-        dirty = true;
-        const thread = await client.channels.fetch(threadId).catch(() => null);
-        await thread?.send(`Agent \`${mapping.agent_name}\` is no longer running.`).catch(() => {});
-      }
-      continue;
+  for (const [machine, entries] of byMachine) {
+    const agents = await herdr.listAgents(machine).catch(() => null);
+    if (agents === null) continue;
+    const byName = new Map();
+    for (const a of agents) {
+      const name = a.name ?? a.agent;
+      if (name) byName.set(name, a.status ?? a.agent_status ?? "unknown");
     }
-    if (status === prev) continue;
-
-    mapping.last_status = status;
-    dirty = true;
-    if (!config.statusPosts || prev === "starting" || prev === "gone") continue;
-
-    const thread = await client.channels.fetch(threadId).catch(() => null);
-    if (!thread) continue;
-
-    if (status === "blocked") {
-      const snapshot = await herdr
-        .readAgent(mapping.agent_name, { source: "detection", lines: 25 })
-        .catch(() => "");
-      if (snapshot.trim()) await postOutput(thread, snapshot).catch(() => {});
-      await thread
-        .send({
-          content: `🛑 \`${mapping.agent_name}\` needs input — pick an option or reply here:`,
-          components: promptComponents(mapping.agent_name, parsePrompt(snapshot)),
-        })
-        .catch(() => {});
-    } else if (status === "done") {
-      const output = await herdr
-        .readAgent(mapping.agent_name, { lines: config.outputLines })
-        .catch(() => "");
-      await thread.send(`✅ \`${mapping.agent_name}\` finished.`).catch(() => {});
-      if (output.trim()) await postOutput(thread, output).catch(() => {});
+    for (const [threadId, mapping] of entries) {
+      dirty = (await relayTransition(threadId, mapping, byName.get(mapping.agent_name))) || dirty;
     }
   }
   if (dirty) saveState(state);
+}
+
+// Compare a mapping's last status with the live one; post transitions and
+// return true when state changed.
+async function relayTransition(threadId, mapping, status) {
+  const prev = mapping.last_status;
+
+  if (status === undefined) {
+    if (prev === "gone") return false;
+    mapping.last_status = "gone";
+    const thread = await client.channels.fetch(threadId).catch(() => null);
+    await thread?.send(`Agent \`${mapping.agent_name}\` is no longer running.`).catch(() => {});
+    return true;
+  }
+  if (status === prev) return false;
+
+  mapping.last_status = status;
+  if (!config.statusPosts || prev === "starting" || prev === "gone") return true;
+
+  const thread = await client.channels.fetch(threadId).catch(() => null);
+  if (!thread) return true;
+
+  if (status === "blocked") {
+    const snapshot = await herdr
+      .readAgent(mapping.agent_name, { source: "detection", lines: 25, machine: mapping.machine })
+      .catch(() => "");
+    if (snapshot.trim()) await postOutput(thread, snapshot).catch(() => {});
+    await thread
+      .send({
+        content: `🛑 \`${mapping.agent_name}\` needs input — pick an option or reply here:`,
+        components: promptComponents(mapping.agent_name, parsePrompt(snapshot)),
+      })
+      .catch(() => {});
+  } else if (status === "done") {
+    const output = await herdr
+      .readAgent(mapping.agent_name, { lines: config.outputLines, machine: mapping.machine })
+      .catch(() => "");
+    await thread.send(`✅ \`${mapping.agent_name}\` finished.`).catch(() => {});
+    if (output.trim()) await postOutput(thread, output).catch(() => {});
+  }
+  return true;
 }
 
 client.on("threadCreate", onThreadCreate);

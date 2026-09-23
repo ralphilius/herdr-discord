@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { parseTopicConfig } from "./topics.js";
 
 const root = process.env.HERDR_PLUGIN_ROOT ?? process.cwd();
 const configDir = process.env.HERDR_PLUGIN_CONFIG_DIR ?? root;
@@ -53,11 +54,12 @@ export const config = {
   outputLines: Math.min(Math.max(parseInt(env("DISCORD_OUTPUT_LINES") || "30", 10) || 30, 1), 80),
   pollMs: Math.max(parseInt(env("DISCORD_POLL_MS") || "3000", 10) || 3000, 1000),
   channels,
-  // When channels.json is empty, every channel accepts agent threads with
-  // global defaults. When it has entries, only listed channels are watched.
-  channelConfig(channelId) {
+  // A channel is watched when it has a channels.json entry (which overrides
+  // everything) or when its topic carries a `herdr:` marker. Returns null for
+  // unwatched channels.
+  channelConfig(channelId, topic) {
     if (channels[channelId]) return channels[channelId];
-    return Object.keys(channels).length === 0 ? {} : null;
+    return parseTopicConfig(topic);
   },
 };
 

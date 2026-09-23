@@ -54,8 +54,24 @@ cp channels.example.json "$CONFIG_DIR/channels.json"
 Edit `$CONFIG_DIR/.env` — at minimum `DISCORD_BOT_TOKEN`. See
 [.env.example](.env.example) for every option.
 
-`channels.json` maps Discord channel IDs to Herdr settings. Each listed channel
-gets its own lazily-created workspace; threads become tabs inside it:
+### Which channels spawn agents
+
+A channel is watched when **either**:
+
+- its **topic contains a `herdr:` marker** — configure the channel in Discord
+  itself, no server file edits needed:
+
+  ```
+  herdr: cwd=~/code/my-api kind=claude
+  herdr: {"kind": "codex", "cwd": "/srv/infra", "machine": "gpu-box"}
+  herdr:                     # marker alone = watch with global defaults
+  ```
+
+  Keys: `cwd`, `kind`, `label` (workspace name), `machine`. Forum channels work
+  too — their guidelines field is the topic.
+
+- or it has an entry in **`channels.json`** in the plugin config dir (overrides
+  the topic):
 
 ```json
 {
@@ -63,12 +79,20 @@ gets its own lazily-created workspace; threads become tabs inside it:
 }
 ```
 
-When `channels.json` is absent or empty, **every** channel accepts agent threads
-using the global defaults. When it has entries, only listed channels are
-watched.
+Each watched channel gets its own lazily-created Herdr workspace; threads
+become tabs inside it.
 
-Per-thread overrides: put `kind:codex` and/or `cwd:/path` on their own lines in
-the thread's starter message.
+### Routing channels to other machines
+
+`machine` names a saved Herdr machine profile (`herdr machine add <ssh-target>`
+on the host running the bot). The bridge then issues all commands for that
+channel through `herdr --machine <label>`, so `#gpu-jobs` can spawn agents on a
+remote box while `#local` uses the Herdr server the bot runs on. Workspace/tab/
+agent IDs are server-local — a channel's workspace lives entirely on its
+machine, and status polling queries each machine separately.
+
+Per-thread overrides: put `kind:codex`, `cwd:/path`, and/or `machine:gpu-box`
+on their own lines in the thread's starter message.
 
 ## Run
 

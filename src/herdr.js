@@ -10,11 +10,16 @@ export class HerdrError extends Error {
   }
 }
 
+function withMachine(args, machine) {
+  return machine ? ["--machine", machine, ...args] : args;
+}
+
 // Run a herdr CLI command and return the parsed JSON response. Most CLI
 // commands print {"id": ..., "result": {...}} or {"error": {...}}.
-export function herdr(args, { timeout = 30000 } = {}) {
+// `machine` routes the call to a saved SSH machine (`herdr --machine`).
+export function herdr(args, { timeout = 30000, machine = null } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(bin, withMachine(args, machine), { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
@@ -51,9 +56,9 @@ export function herdr(args, { timeout = 30000 } = {}) {
 
 // Same, but returns raw stdout for commands that print terminal text
 // (pane read, agent read).
-export function herdrText(args, { timeout = 30000 } = {}) {
+export function herdrText(args, { timeout = 30000, machine = null } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(bin, withMachine(args, machine), { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
@@ -76,68 +81,73 @@ export function herdrText(args, { timeout = 30000 } = {}) {
 
 // List commands print JSON by default on current Herdr builds; retry without
 // --json for builds where the flag isn't accepted.
-async function list(args, key) {
-  const res = await herdr([...args, "--json"]).catch(() => herdr(args));
+async function list(args, key, machine) {
+  const res = await herdr([...args, "--json"], { machine }).catch(() => herdr(args, { machine }));
   return res[key] ?? (Array.isArray(res) ? res : []);
 }
 
-export function listAgents() {
-  return list(["agent", "list"], "agents");
+export function listAgents(machine) {
+  return list(["agent", "list"], "agents", machine);
 }
 
-export function listWorkspaces() {
-  return list(["workspace", "list"], "workspaces");
+export function listWorkspaces(machine) {
+  return list(["workspace", "list"], "workspaces", machine);
 }
 
-export async function findWorkspace(workspaceId) {
-  const workspaces = await listWorkspaces();
+export async function findWorkspace(workspaceId, machine) {
+  const workspaces = await listWorkspaces(machine);
   return workspaces.find((w) => w.workspace_id === workspaceId) ?? null;
 }
 
-export async function ensureWorkspace({ workspaceId, cwd, label }) {
+export async function ensureWorkspace({ workspaceId, cwd, label, machine }) {
   if (workspaceId) {
-    const existing = await findWorkspace(workspaceId).catch(() => null);
+    const existing = await findWorkspace(workspaceId, machine).catch(() => null);
     if (existing) return existing;
   }
   const args = ["workspace", "create", "--label", label, "--no-focus"];
   if (cwd) args.push("--cwd", cwd);
-  const res = await herdr(args);
+  const res = await herdr(args, { machine });
   return res.workspace;
 }
 
-export async function createTab({ workspaceId, cwd, label }) {
+export async function createTab({ workspaceId, cwd, label, machine }) {
   const args = ["tab", "create", "--workspace", workspaceId, "--label", label, "--no-focus"];
   if (cwd) args.push("--cwd", cwd);
-  return herdr(args);
+  return herdr(args, { machine });
 }
 
-export async function startAgent({ name, kind, paneId }) {
-  return herdr(["agent", "start", name, "--kind", kind, "--pane", paneId], { timeout: 320000 });
+export async function startAgent({ name, kind, paneId, machine }) {
+  return herdr(["agent", "start", name, "--kind", kind, "--pane", paneId], {
+    timeout: 320000,
+    machine,
+  });
 }
 
-export async function promptAgent(target, text) {
-  return herdr(["agent", "prompt", target, text]);
+export async function promptAgent(target, text, machine) {
+  return herdr(["agent", "prompt", target, text], { machine });
 }
 
-export async function getAgent(target) {
-  const res = await herdr(["agent", "get", target]);
+export async function getAgent(target, machine) {
+  const res = await herdr(["agent", "get", target], { machine });
   return res.agent ?? res;
 }
 
-export function readAgent(target, { source = "recent", lines = 30 } = {}) {
-  return herdrText(["agent", "read", target, "--source", source, "--lines", String(lines)]);
+export function readAgent(target, { source = "recent", lines = 30, machine = null } = {}) {
+  return herdrText(["agent", "read", target, "--source", source, "--lines", String(lines)], {
+    machine,
+  });
 }
 
-export async function sendKeys(target, keys) {
-  return herdr(["agent", "send-keys", target, ...keys]);
+export async function sendKeys(target, keys, machine) {
+  return herdr(["agent", "send-keys", target, ...keys], { machine });
 }
 
 // Literal text into the pane's PTY (no Enter). Used for free-text answers
 // to blocked agents, where send-keys would need one event per character.
-export async function sendText(paneId, text) {
-  return herdr(["pane", "send-text", paneId, text]);
+export async function sendText(paneId, text, machine) {
+  return herdr(["pane", "send-text", paneId, text], { machine });
 }
 
-export async function closeTab(tabId) {
-  return herdr(["tab", "close", tabId]);
+export async function closeTab(tabId, machine) {
+  return herdr(["tab", "close", tabId], { machine });
 }

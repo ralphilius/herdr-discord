@@ -6,6 +6,7 @@
   },
   "9876543210987654321": {
     "cwd": "/srv/infra",
-    "kind": "codex"
+    "kind": "codex",
+    "machine": "gpu-box"
   }
 }
