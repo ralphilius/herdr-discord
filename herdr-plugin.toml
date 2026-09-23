@@ -15,7 +15,7 @@ command = ["node", "src/startup.js"]
 id = "bot"
 title = "Discord bot"
 placement = "tab"
-command = ["node", "src/bot.js"]
+command = ["node", "src/run.js"]
 
 [[actions]]
 id = "open-bot"

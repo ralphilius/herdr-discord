@@ -1,0 +1,21 @@
+# systemd --user unit for the headless Herdr server.
+# Install:  mkdir -p ~/.config/systemd/user && cp herdr-server.service ~/.config/systemd/user/
+#           systemctl --user daemon-reload
+#           systemctl --user enable --now herdr-server
+#           loginctl enable-linger "$USER"   # start at boot without login
+# Logs:     journalctl --user -u herdr-server -f
+
+[Unit]
+Description=Herdr server (headless session host)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust if `which herdr` differs on the server.
+ExecStart=%h/.local/bin/herdr server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

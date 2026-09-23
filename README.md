@@ -96,6 +96,48 @@ command = "herdr.discord.open-bot"
 description = "open Discord bot"
 ```
 
+## Running on a server (always on)
+
+Three pieces keep the bridge alive on a headless box:
+
+1. **Herdr server under systemd.** `herdr server` is the headless mode; a
+   user unit keeps it running across reboots:
+
+   ```sh
+   # on the server
+   curl -fsSL https://herdr.dev/install.sh | sh
+   mkdir -p ~/.config/systemd/user
+   cp deploy/herdr-server.service ~/.config/systemd/user/
+   systemctl --user daemon-reload
+   systemctl --user enable --now herdr-server
+   loginctl enable-linger "$USER"   # start at boot, no login needed
+   ```
+
+2. **Autostart the bot tab.** With `DISCORD_AUTOSTART=1` in the plugin `.env`,
+   the startup hook reopens the bot pane every time the server starts —
+   including after reboots. It creates a `discord` workspace first if the
+   session has none.
+
+3. **Crash resilience.** The pane entrypoint is `src/run.js`, a supervisor
+   that restarts `bot.js` with backoff (5s → 5m). A crash or a bad token
+   retries forever instead of silently dying; fixing `.env` self-heals.
+
+On the server, install the plugin and configure it as usual:
+
+```sh
+herdr plugin install <owner>/herdr-discord    # or: git clone … && herdr plugin link .
+CONFIG_DIR="$(herdr plugin config-dir herdr.discord)"
+cp .env.example "$CONFIG_DIR/.env"            # set DISCORD_BOT_TOKEN, DISCORD_AUTOSTART=1
+```
+
+Then drive it from your laptop without SSH: `herdr machine add <ssh-target>`
+saves the server as a remote machine, so its workspaces/agents appear in your
+local Herdr UI and `herdr --machine <label> …` routes CLI commands there.
+
+**Security:** on a shared Discord server, anyone who can post in a watched
+channel can steer your agents — use a private channel and set
+`DISCORD_ALLOWED_USERS`.
+
 ## Using the bridge
 
 1. Create a thread (or forum post) in a watched channel. The bot starts a
