@@ -5,9 +5,10 @@
 //   "herdr: kind=codex cwd=~/code/x"  → key=value pairs
 //   "herdr: {\"kind\":\"codex\"}"      → JSON object
 //
-// Supported keys: cwd, kind, label, machine (a `herdr machine` profile).
+// Supported keys: cwd, kind, label, machine (a `herdr machine` profile),
+// workspace (id or label of an existing Herdr workspace to bind to).
 // Forum channels work too — Discord stores their "guidelines" in `topic`.
-const KNOWN_KEYS = new Set(["cwd", "kind", "label", "machine"]);
+const KNOWN_KEYS = new Set(["cwd", "kind", "label", "machine", "workspace"]);
 
 export function parseTopicConfig(topic) {
   if (!topic) return null;

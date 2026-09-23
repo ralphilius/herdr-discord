@@ -7,6 +7,7 @@ import {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  StringSelectMenuBuilder,
 } from "discord.js";
 import { config, requireToken } from "./config.js";
 import * as herdr from "./herdr.js";
@@ -70,12 +71,23 @@ function authorized(userId) {
   return config.allowedUsers.size === 0 || config.allowedUsers.has(userId);
 }
 
+// Resolve a `workspace=` channel config value: workspace id or label.
+async function resolveWorkspace(idOrLabel, machine) {
+  const workspaces = await herdr.listWorkspaces(machine).catch(() => []);
+  return (
+    workspaces.find((w) => w.workspace_id === idOrLabel || w.label === idOrLabel) ?? null
+  );
+}
+
 async function onThreadCreate(thread) {
   try {
     if (config.guildId && thread.guildId !== config.guildId) return;
     if (state.threads[thread.id]) return;
 
-    const channelCfg = config.channelConfig(thread.parentId, thread.parent?.topic);
+    const channelState = state.channels[thread.parentId];
+    const channelCfg =
+      config.channelConfig(thread.parentId, thread.parent?.topic) ??
+      (channelState?.bound ? {} : null);
     if (channelCfg === null) return;
 
     const starter = await thread.fetchStarterMessage().catch(() => null);
@@ -87,20 +99,35 @@ async function onThreadCreate(thread) {
     const { prompt } = starter_directives;
     const kind = starter_directives.kind ?? channelCfg.kind ?? config.agentKind;
     const cwd = starter_directives.cwd ?? channelCfg.cwd ?? config.cwd;
-    const machine = starter_directives.machine ?? channelCfg.machine ?? null;
+    const machine =
+      starter_directives.machine ?? channelCfg.machine ?? channelState?.machine ?? null;
 
     await thread.send(`Starting a **${kind}** agent for this thread…`);
 
-    const channelState = (state.channels[thread.parentId] ??= {});
-    if (channelState.machine !== machine) channelState.workspace_id = null;
-    channelState.machine = machine;
-    const workspace = await herdr.ensureWorkspace({
-      workspaceId: channelState.workspace_id,
-      cwd: channelCfg.cwd ?? config.cwd,
-      label: channelCfg.label ?? thread.parent?.name ?? `discord-${thread.parentId}`,
-      machine,
-    });
-    channelState.workspace_id = workspace.workspace_id;
+    const chState = (state.channels[thread.parentId] ??= {});
+    let workspace;
+    if (channelCfg.workspace) {
+      workspace = await resolveWorkspace(channelCfg.workspace, machine);
+      if (!workspace) {
+        throw new Error(
+          `workspace "${channelCfg.workspace}" not found${machine ? ` on ${machine}` : ""} — fix the channel topic or run \`!setup\``,
+        );
+      }
+    } else {
+      // Bound channels reuse their workspace only while the machine matches;
+      // a machine override spins up elsewhere without touching the binding.
+      const useBound = chState.bound && chState.machine === machine;
+      workspace = await herdr.ensureWorkspace({
+        workspaceId: useBound ? chState.workspace_id : null,
+        cwd: channelCfg.cwd ?? config.cwd,
+        label: channelCfg.label ?? thread.parent?.name ?? `discord-${thread.parentId}`,
+        machine,
+      });
+      if (!chState.bound) {
+        chState.machine = machine;
+        chState.workspace_id = workspace.workspace_id;
+      }
+    }
 
     const tab = await herdr.createTab({
       workspaceId: workspace.workspace_id,
@@ -149,7 +176,16 @@ async function onThreadCreate(thread) {
 
 async function onMessage(msg) {
   try {
-    if (msg.author.bot || !msg.channel.isThread()) return;
+    if (msg.author.bot) return;
+    if (config.guildId && msg.guildId !== config.guildId) return;
+
+    if (!msg.channel.isThread()) {
+      if (msg.hasThread) return; // thread starter echo in the parent channel
+      const text = msg.content.trim();
+      if (text.startsWith("!")) await onChannelCommand(msg, text);
+      return;
+    }
+
     const mapping = state.threads[msg.channel.id];
     if (!mapping) return;
     if (!authorized(msg.author.id)) {
@@ -179,6 +215,85 @@ async function onMessage(msg) {
   } catch (err) {
     console.error("messageCreate failed:", err);
     await msg.reply(`Error: ${err.message}`).catch(() => {});
+  }
+}
+
+// Commands posted in the channel itself (not a thread). `!setup` binds the
+// channel to an existing workspace; binding also watches the channel.
+async function onChannelCommand(msg, text) {
+  const [cmd, arg] = text.slice(1).split(/\s+/, 2);
+  const chState = state.channels[msg.channelId];
+
+  switch (cmd.toLowerCase()) {
+    case "setup": {
+      if (!authorized(msg.author.id)) {
+        await msg.reply("You are not on the allowed-users list for this bridge.");
+        return;
+      }
+      const machine =
+        arg ||
+        config.channelConfig(msg.channelId, msg.channel.topic)?.machine ||
+        chState?.machine ||
+        null;
+      const workspaces = await herdr.listWorkspaces(machine).catch(() => []);
+      const select = new StringSelectMenuBuilder()
+        .setCustomId(`hd:setup:${msg.channelId}`)
+        .setPlaceholder("Pick a Herdr workspace for this channel");
+      for (const w of workspaces.slice(0, 24)) {
+        select.addOptions({
+          label: (w.label ?? w.workspace_id).slice(0, 100),
+          value: JSON.stringify({ m: machine, w: w.workspace_id }),
+          description: (w.cwd ?? "").slice(0, 100) || "existing workspace",
+        });
+      }
+      select.addOptions({
+        label: "New workspace (auto-created)",
+        value: JSON.stringify({ m: machine, new: true }),
+        description: "create one from this channel on the first thread",
+      });
+      await msg.reply({
+        content: `Bind this channel to a Herdr workspace${machine ? ` on \`${machine}\`` : ""}:`,
+        components: [new ActionRowBuilder().addComponents(select)],
+      });
+      break;
+    }
+    case "unbind": {
+      if (!authorized(msg.author.id)) return;
+      delete state.channels[msg.channelId];
+      saveState(state);
+      const stillWatched = config.channelConfig(msg.channelId, msg.channel.topic) !== null;
+      await msg.reply(
+        stillWatched
+          ? "Workspace binding cleared — the topic/channels.json still watch this channel, so new threads auto-create a workspace."
+          : "Channel unbound — new threads will no longer spawn agents.",
+      );
+      break;
+    }
+    case "status": {
+      const watched =
+        config.channelConfig(msg.channelId, msg.channel.topic) !== null || chState?.bound;
+      const lines = [`Channel watched: **${watched ? "yes" : "no"}**`];
+      if (chState?.workspace_id)
+        lines.push(
+          `Workspace: \`${chState.workspace_id}\`${chState.bound ? " (bound via !setup)" : " (auto-created)"}`,
+        );
+      if (chState?.machine) lines.push(`Machine: \`${chState.machine}\``);
+      const threads = Object.values(state.threads).filter(
+        (t) => t.channel_id === msg.channelId,
+      ).length;
+      lines.push(`Mapped threads: ${threads}`);
+      await msg.reply(lines.join("\n"));
+      break;
+    }
+    case "help": {
+      await msg.reply(
+        "`!setup [machine]` bind this channel to a Herdr workspace · `!unbind` clear the binding · `!status` channel state\n" +
+          "Or put `herdr:` in the channel topic, e.g. `herdr: workspace=my-api kind=claude`.",
+      );
+      break;
+    }
+    default:
+      break;
   }
 }
 
@@ -292,12 +407,28 @@ async function markAnswered(ix, note) {
 
 async function onInteraction(ix) {
   try {
-    if (!ix.isButton() && !ix.isModalSubmit()) return;
+    if (!ix.isButton() && !ix.isModalSubmit() && !ix.isStringSelectMenu()) return;
     const [ns, kind, agentName, payload] = ix.customId.split(":");
     if (ns !== "hd" || !kind || !agentName) return;
     if (!authorized(ix.user.id)) {
       return ix.reply({ content: "You are not on the allowed-users list for this bridge.", ephemeral: true });
     }
+
+    if (ix.isStringSelectMenu() && kind === "setup") {
+      const channelId = agentName;
+      const v = JSON.parse(ix.values[0]);
+      state.channels[channelId] = v.new
+        ? { bound: true, machine: v.m ?? null }
+        : { bound: true, machine: v.m ?? null, workspace_id: v.w };
+      saveState(state);
+      return ix.update({
+        content: v.new
+          ? `Channel bound — a new workspace will be created on the first thread${v.m ? ` on \`${v.m}\`` : ""}.`
+          : `Channel bound to workspace \`${v.w}\`${v.m ? ` on \`${v.m}\`` : ""}. New threads spawn agents as tabs there.`,
+        components: [],
+      });
+    }
+
     const mapping = mappingForAgent(agentName);
     if (!mapping) {
       return ix.reply({ content: `No agent named \`${agentName}\` is mapped anymore.`, ephemeral: true });

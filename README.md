@@ -67,8 +67,13 @@ A channel is watched when **either**:
   herdr:                     # marker alone = watch with global defaults
   ```
 
-  Keys: `cwd`, `kind`, `label` (workspace name), `machine`. Forum channels work
-  too — their guidelines field is the topic.
+  Keys: `cwd`, `kind`, `label` (workspace name), `machine`, `workspace`
+  (existing workspace id or label — binds instead of creating). Forum channels
+  work too — their guidelines field is the topic.
+
+- or it is **bound with `!setup`** — post `!setup` in the channel and pick a
+  workspace from the dropdown. The binding is stored in plugin state and also
+  watches the channel; no topic or file needed.
 
 - or it has an entry in **`channels.json`** in the plugin config dir (overrides
   the topic):
@@ -79,8 +84,22 @@ A channel is watched when **either**:
 }
 ```
 
-Each watched channel gets its own lazily-created Herdr workspace; threads
-become tabs inside it.
+Each watched channel maps to one Herdr workspace; threads become tabs inside
+it. With `workspace=` or `!setup` the channel adopts an existing workspace
+(created via Herdr's New button or any other way) — channel and workspace
+names don't need to match. Without a binding, the bridge creates a workspace
+labeled after the channel on the first thread.
+
+### Channel commands
+
+Posted in the channel itself (not a thread):
+
+| Command           | Effect                                                  |
+| ----------------- | ------------------------------------------------------- |
+| `!setup [machine]` | Pick an existing workspace from a dropdown and bind it |
+| `!unbind`         | Clear the workspace binding                             |
+| `!status`         | Show the channel's binding and mapped-thread count      |
+| `!help`           | Show channel commands                                   |
 
 ### Routing channels to other machines
 
