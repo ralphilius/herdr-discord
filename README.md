@@ -46,9 +46,9 @@ herdr plugin link .
 
 ```sh
 CONFIG_DIR="$(herdr plugin config-dir herdr.discord)"
-cp .env.example "$CONFIG_DIR/.env"
+curl -fsSL https://raw.githubusercontent.com/ralphilius/herdr-discord/main/.env.example -o "$CONFIG_DIR/.env"
 # optional: per-channel routing
-cp channels.example.json "$CONFIG_DIR/channels.json"
+curl -fsSL https://raw.githubusercontent.com/ralphilius/herdr-discord/main/channels.example.json -o "$CONFIG_DIR/channels.json"
 ```
 
 Edit `$CONFIG_DIR/.env` — at minimum `DISCORD_BOT_TOKEN`. See
@@ -147,10 +147,11 @@ Three pieces keep the bridge alive on a headless box:
    user unit keeps it running across reboots:
 
    ```sh
-   # on the server
+   # on the server — no repo checkout needed
    curl -fsSL https://herdr.dev/install.sh | sh
    mkdir -p ~/.config/systemd/user
-   cp deploy/herdr-server.service ~/.config/systemd/user/
+   curl -fsSL https://raw.githubusercontent.com/ralphilius/herdr-discord/main/deploy/herdr-server.service \
+     -o ~/.config/systemd/user/herdr-server.service
    systemctl --user daemon-reload
    systemctl --user enable --now herdr-server
    loginctl enable-linger "$USER"   # start at boot, no login needed
@@ -168,9 +169,10 @@ Three pieces keep the bridge alive on a headless box:
 On the server, install the plugin and configure it as usual:
 
 ```sh
-herdr plugin install ralphilius/herdr-discord    # or: git clone … && herdr plugin link .
+herdr plugin install ralphilius/herdr-discord
 CONFIG_DIR="$(herdr plugin config-dir herdr.discord)"
-cp .env.example "$CONFIG_DIR/.env"            # set DISCORD_BOT_TOKEN, DISCORD_AUTOSTART=1
+curl -fsSL https://raw.githubusercontent.com/ralphilius/herdr-discord/main/.env.example -o "$CONFIG_DIR/.env"
+# edit .env: set DISCORD_BOT_TOKEN and DISCORD_AUTOSTART=1
 ```
 
 Then drive it from your laptop without SSH: `herdr machine add <ssh-target>`
