@@ -84,14 +84,26 @@ async function onThreadCreate(thread) {
     if (config.guildId && thread.guildId !== config.guildId) return;
     if (state.threads[thread.id]) return;
 
+    const starter = await thread.fetchStarterMessage().catch(() => null);
+    if (starter && !authorized(starter.author.id)) return;
+
     const channelState = state.channels[thread.parentId];
     const channelCfg =
       config.channelConfig(thread.parentId, thread.parent?.topic) ??
       (channelState?.bound ? {} : null);
-    if (channelCfg === null) return;
-
-    const starter = await thread.fetchStarterMessage().catch(() => null);
-    if (starter && !authorized(starter.author.id)) return;
+    if (channelCfg === null) {
+      // Silent for ordinary threads in unwatched channels — but a `!` command
+      // was aimed at the bot, so say why nothing happened.
+      if (starter?.content?.trim().startsWith("!")) {
+        await thread
+          .send(
+            "This channel isn't watched yet. Post `!setup` in the channel itself " +
+              "(not in a thread) to bind a workspace, or add `herdr:` to the channel topic.",
+          )
+          .catch(() => {});
+      }
+      return;
+    }
 
     await thread.join().catch(() => {});
 
@@ -167,7 +179,8 @@ async function onThreadCreate(thread) {
         "Reply here to prompt it. Commands: `!status` `!read [n]` `!approve` `!close` `!help`",
     );
 
-    if (prompt) await herdr.promptAgent(name, prompt, machine);
+    // A `!` starter is a command aimed at the bot, not agent input.
+    if (prompt && !prompt.startsWith("!")) await herdr.promptAgent(name, prompt, machine);
   } catch (err) {
     console.error("threadCreate failed:", err);
     await thread.send(`Failed to start agent: ${err.message}`).catch(() => {});
@@ -328,6 +341,13 @@ async function onCommand(msg, mapping, text) {
       if (mapping.tab_id) await herdr.closeTab(mapping.tab_id, mapping.machine).catch(() => {});
       delete state.threads[msg.channel.id];
       saveState(state);
+      break;
+    }
+    case "setup": {
+      await msg.reply(
+        "`!setup` is a channel command — post it in the channel itself, not in a thread. " +
+          "This thread already has an agent (`!status` to check it).",
+      );
       break;
     }
     case "help": {
