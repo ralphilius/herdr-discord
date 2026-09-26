@@ -20,5 +20,5 @@ Every user-visible change (feature, fix, docs affecting install behavior) must e
 
 - ESM Node (`"type": "module"`), no build step, `discord.js` v14, Node >= 18.
 - All Herdr calls go through `src/herdr.js` (`HERDR_BIN_PATH`, never a hardcoded socket path). Global flags like `--machine` are prepended by `withMachine` — pass `machine` via the options arg, don't add flags manually.
-- Verify with `node --check` on changed files; no test framework exists.
+- Verify with `node --check` on changed files and `npm test` (node:test, specs in `test/`). Keep Discord/herdr seams behind injected deps — `bot.js` is untestable at module level (it logs in on import).
 - Never commit `DISCORD_BOT_TOKEN` or `.env` (gitignored).

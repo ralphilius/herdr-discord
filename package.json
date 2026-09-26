@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node src/bot.js",
+    "test": "node --test test/",
     "version": "node scripts/sync-version.js && git add herdr-plugin.toml"
   },
   "dependencies": {

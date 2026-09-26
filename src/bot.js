@@ -14,9 +14,13 @@ import { config, requireToken } from "./config.js";
 import * as herdr from "./herdr.js";
 import { parsePrompt, keysForOption } from "./prompts.js";
 import { loadState, saveState } from "./state.js";
+import { midTurnDescription } from "./capabilities.js";
+import { handleUserText, flushQueue } from "./thread-input.js";
+import { Relay } from "./relay.js";
 
 const token = requireToken();
 const state = loadState();
+const relay = new Relay();
 
 const client = new Client({
   intents: [
@@ -185,7 +189,9 @@ async function onThreadCreate(thread) {
       thread,
       `Agent \`${name}\` (${kind}) is up — tab \`${tab.tab?.tab_id}\` in workspace \`${workspace.workspace_id}\`` +
         `${machine ? ` on \`${machine}\`` : ""}.\n` +
-        "Reply here to prompt it. Commands: `!status` `!read [n]` `!approve` `!close` `!help`",
+        "Reply here to prompt it; output relays here as it runs.\n" +
+        `Mid-turn prompts: ${midTurnDescription(kind)} · \`!!text\` sends raw input immediately.\n` +
+        "Commands: `!status` `!read [n]` `!queue` `!approve` `!close` `!help`",
     );
 
     // A `!` starter is a command aimed at the bot, not agent input.
@@ -245,24 +251,20 @@ async function onMessage(msg) {
     }
 
     const text = msg.content.trim();
-    if (text.startsWith("!")) return onCommand(msg, mapping, text);
+    if (text.startsWith("!") && !text.startsWith("!!")) return onCommand(msg, mapping, text);
 
     const attachments = [...msg.attachments.values()].map((a) => a.url);
     const prompt =
       `${msg.member?.displayName ?? msg.author.username}: ${text}` +
       (attachments.length ? `\n${attachments.join("\n")}` : "");
-    try {
-      await herdr.promptAgent(mapping.agent_name, prompt, mapping.machine);
-      await msg.react("✅").catch(() => {});
-    } catch (err) {
-      if (err.code === "agent_blocked") {
-        await msg.reply(
-          "Agent is blocked on a prompt in Herdr. Resolve it in the terminal, or try `!approve`.",
-        );
-      } else {
-        throw err;
-      }
-    }
+    await handleUserText({
+      msg,
+      mapping,
+      text,
+      prompt,
+      herdr,
+      persist: () => saveState(state),
+    });
   } catch (err) {
     console.error("messageCreate failed:", err);
     await msg.reply(`Error: ${err.message}`).catch(() => {});
@@ -377,9 +379,20 @@ async function onCommand(msg, mapping, text) {
       await msg.react("👍").catch(() => {});
       break;
     }
+    case "queue": {
+      const q = mapping.queue ?? [];
+      await msg.reply(
+        q.length
+          ? `Held messages (${q.length}):\n` +
+              q.map((e, i) => `${i + 1}. ${e.text.split("\n")[0].slice(0, 80)}`).join("\n")
+          : "No held messages.",
+      );
+      break;
+    }
     case "close": {
       await msg.reply("Closing the agent tab…");
       if (mapping.tab_id) await herdr.closeTab(mapping.tab_id, mapping.machine).catch(() => {});
+      relay.drop(msg.channel.id);
       delete state.threads[msg.channel.id];
       saveState(state);
       break;
@@ -393,8 +406,9 @@ async function onCommand(msg, mapping, text) {
     }
     case "help": {
       await msg.reply(
-        "`!status` agent status · `!read [n]` last n output lines · " +
+        "`!status` agent status · `!read [n]` last n output lines · `!queue` held prompts · " +
           "`!approve` send Enter to a blocked agent · `!close` close the agent tab\n" +
+          "`!!text` types raw input into the agent right now — for harness commands (`/btw`, …) and force-send.\n" +
           "Starter directives (own lines): `kind:<agent>` `cwd:<path>` `machine:<label>`. " +
           "Channel config goes in the channel topic: `herdr: kind=codex cwd=~/code/x`.",
       );
@@ -559,10 +573,48 @@ async function pollAgents() {
       if (name) byName.set(name, a.status ?? a.agent_status ?? "unknown");
     }
     for (const [threadId, mapping] of entries) {
-      dirty = (await relayTransition(threadId, mapping, byName.get(mapping.agent_name))) || dirty;
+      const status = byName.get(mapping.agent_name);
+      dirty = (await relayOutput(threadId, mapping, status)) || dirty;
+      dirty = (await relayTransition(threadId, mapping, status)) || dirty;
     }
   }
   if (dirty) saveState(state);
+}
+
+// Every poll tick, diff the agent's scrollback and post the newly-stable tail.
+// First read per thread only seeds the baseline — nothing is back-posted. On a
+// bot restart that baseline is rebuilt and the thread gets a resume note.
+async function relayOutput(threadId, mapping, status) {
+  if (status === undefined) return false;
+  const fresh = !relay.has(threadId);
+  const text = await herdr
+    .readAgent(mapping.agent_name, {
+      source: "recent-unwrapped",
+      lines: 400,
+      machine: mapping.machine,
+    })
+    .catch(() => null);
+  if (text === null) return false;
+  const emit = relay.update(threadId, text);
+
+  let dirty = false;
+  const needThread = emit.length > 0 || (fresh && mapping.relay_seeded);
+  const thread = needThread
+    ? await client.channels.fetch(threadId).catch(() => null)
+    : null;
+  if (fresh) {
+    if (mapping.relay_seeded && thread) {
+      await thread
+        .send("⟳ relay resumed — output since the bot restart is not replayed")
+        .catch(() => {});
+    }
+    if (!mapping.relay_seeded) {
+      mapping.relay_seeded = true;
+      dirty = true;
+    }
+  }
+  if (thread && emit.length) await postOutput(thread, emit.join("\n")).catch(() => {});
+  return dirty;
 }
 
 // Compare a mapping's last status with the live one; post transitions and
@@ -573,35 +625,48 @@ async function relayTransition(threadId, mapping, status) {
   if (status === undefined) {
     if (prev === "gone") return false;
     mapping.last_status = "gone";
+    const dropped = (mapping.queue ?? []).length;
+    mapping.queue = [];
+    const rest = relay.flush(threadId);
+    relay.drop(threadId);
     const thread = await client.channels.fetch(threadId).catch(() => null);
-    await thread?.send(`Agent \`${mapping.agent_name}\` is no longer running.`).catch(() => {});
+    if (thread && rest.length) await postOutput(thread, rest.join("\n")).catch(() => {});
+    await thread
+      ?.send(
+        `Agent \`${mapping.agent_name}\` is no longer running.` +
+          (dropped ? ` ${dropped} held message(s) dropped.` : ""),
+      )
+      .catch(() => {});
     return true;
   }
   if (status === prev) return false;
 
   mapping.last_status = status;
-  if (!config.statusPosts || prev === "starting" || prev === "gone") return true;
-
   const thread = await client.channels.fetch(threadId).catch(() => null);
   if (!thread) return true;
+  const announce = config.statusPosts && prev !== "starting" && prev !== "gone";
 
   if (status === "blocked") {
-    const snapshot = await herdr
-      .readAgent(mapping.agent_name, { source: "detection", lines: 25, machine: mapping.machine })
-      .catch(() => "");
-    if (snapshot.trim()) await postOutput(thread, snapshot).catch(() => {});
-    await thread
-      .send({
-        content: `🛑 \`${mapping.agent_name}\` needs input — pick an option or reply here:`,
-        components: promptComponents(mapping.agent_name, parsePrompt(snapshot)),
-      })
-      .catch(() => {});
+    if (announce) {
+      const snapshot = await herdr
+        .readAgent(mapping.agent_name, { source: "detection", lines: 25, machine: mapping.machine })
+        .catch(() => "");
+      if (snapshot.trim()) await postOutput(thread, snapshot).catch(() => {});
+      await thread
+        .send({
+          content: `🛑 \`${mapping.agent_name}\` needs input — pick an option or reply here:`,
+          components: promptComponents(mapping.agent_name, parsePrompt(snapshot)),
+        })
+        .catch(() => {});
+    }
   } else if (status === "done") {
-    const output = await herdr
-      .readAgent(mapping.agent_name, { lines: config.outputLines, machine: mapping.machine })
-      .catch(() => "");
-    await thread.send(`✅ \`${mapping.agent_name}\` finished.`).catch(() => {});
-    if (output.trim()) await postOutput(thread, output).catch(() => {});
+    // The relay covers the output; just drain pending lines and the held queue.
+    const rest = relay.flush(threadId);
+    if (rest.length) await postOutput(thread, rest.join("\n")).catch(() => {});
+    if (announce) await thread.send(`✅ \`${mapping.agent_name}\` finished.`).catch(() => {});
+    await flushQueue(thread, mapping, herdr, () => saveState(state));
+  } else if (status === "idle") {
+    await flushQueue(thread, mapping, herdr, () => saveState(state));
   }
   return true;
 }

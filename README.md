@@ -4,8 +4,9 @@ A [Herdr](https://herdr.dev) plugin that turns Discord into a UI layer for codin
 
 - **Each Discord channel is a Herdr workspace.**
 - **Each new thread is a tab in that workspace running a new agent.**
-- Replies in the thread become agent prompts; agent status (`blocked`, `done`)
-  and output are posted back into the thread.
+- Replies in the thread become agent prompts; the agent's terminal output is
+  **relayed into the thread continuously**, so the thread is a readable record
+  of the whole session — plus status posts (`blocked`, `done`) and buttons.
 
 The bot itself runs inside Herdr as a plugin pane — a real terminal tab, so its
 logs are visible in Herdr and its lifetime is managed by the Herdr server.
@@ -192,8 +193,28 @@ channel can steer your agents — use a private channel and set
    `<kind>` agent in a new Herdr tab and confirms in the thread.
 2. Any message in the thread is sent to the agent as a prompt, prefixed with
    your display name. Attachments are passed through as URLs.
-3. When the agent blocks on a question or finishes a turn, the bot posts the
-   status plus the relevant terminal output.
+3. Agent output **relays into the thread** as it runs — every poll interval the
+   bot diffs the terminal scrollback and posts the lines that have settled.
+   Spinner/status-bar churn is filtered out, so what's posted is a clean,
+   complete record you can read back later.
+4. When the agent blocks on a question or finishes a turn, the bot posts the
+   status plus — for `blocked` — the relevant terminal snapshot with buttons.
+
+### Prompting while an agent is working
+
+What happens to a message sent mid-turn depends on the agent kind:
+
+- **Kinds that accept typed input mid-turn** (`claude`, `codex`) — the message
+  is sent immediately and the agent's own TUI queues it. Reaction: `📥`.
+- **All other kinds** — typing mid-render would land as garbage, so the bridge
+  **holds the message** and sends it when the agent reaches `idle`/`done`.
+  Reaction: `⏳`, swapped to `✅` when delivered. `!queue` lists held messages.
+- **`!!` raw passthrough** — a message starting with `!!` is typed literally
+  into the pane right now (`!!/btw where are you at`), regardless of agent
+  state. Use it for harness-specific commands or to force-send; whatever the
+  TUI does with raw input mid-turn is your call. Reaction: `⚡`.
+
+The startup message in each thread states which behavior applies.
 
 ### Answering blocked agents
 
@@ -218,6 +239,7 @@ keys. Buttons honor `DISCORD_ALLOWED_USERS`.
 | ------------ | --------------------------------------------- |
 | `!status`    | Agent status + workspace/tab/pane ids         |
 | `!read [n]`  | Post the last n lines of agent output         |
+| `!queue`     | List prompts held until the agent settles     |
 | `!approve`   | Send Enter to a blocked agent (buttons usually cover this) |
 | `!close`     | Close the agent's Herdr tab and unmap thread  |
 | `!help`      | Show commands                                 |
@@ -226,8 +248,14 @@ keys. Buttons honor `DISCORD_ALLOWED_USERS`.
 
 - `src/bot.js` — discord.js gateway client; maps `threadCreate` →
   `workspace create` + `tab create` + `agent start`, `messageCreate` →
-  `agent prompt`, polls `agent list` to relay status back, and answers
-  blocked agents via button/modal interactions.
+  `agent prompt` (or the held queue / `!!` passthrough), polls `agent list`
+  for status and `agent read` for the output relay, and answers blocked
+  agents via button/modal interactions.
+- `src/relay.js` — scrollback diffing for the output relay: emits lines once
+  they stabilize or leave the bottom churn zone, collapses duplicate/blank
+  runs.
+- `src/capabilities.js` — per-agent-kind mid-turn strategy (native TUI queue
+  vs bridge-held), since Herdr doesn't expose a capability flag.
 - `src/prompts.js` — parses detection snapshots into clickable options
   (numbered menus, y/n prompts) and maps them to Herdr keys.
 - `src/herdr.js` — thin async wrapper over `HERDR_BIN_PATH` (the Herdr CLI is
