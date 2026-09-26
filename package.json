@@ -1,6 +1,6 @@
 {
   "name": "herdr-discord",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Herdr plugin: Discord as a UI layer. Channels are workspaces, threads are agents.",
   "type": "module",
